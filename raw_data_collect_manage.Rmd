@@ -1,0 +1,251 @@
+---
+title: "Raw Data Collection and Management"
+output: 
+  html_document:
+    theme: flatly
+    toc: yes
+    toc_float:
+      collapsed: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Deliverable Files
+
+You can load the data sets into your R session by placing them in the same folder as your R script or Rmarkdown document and running the code below (replacing "your_data" and "your_filename")
+
+* HS_SADCQ.csv - High school district level survey responses
+* HS_SADCQN.csv - High school district level percentages
+* MS_SADCQN.csv - Middle school district level survey responses
+* MS_SADCQN.csv - Middle school district level percentages
+
+`your_data = read.csv("your_filename.csv",stringsAsFactors = FALSE)`
+
+* HS_SADCQ.Rdata
+* HS_SADCQN.Rdata
+* MS_SADCQ.Rdata
+* MS_SADCQN.Rdata
+
+`your_data = load("your_filename.Rdata")`
+
+# Data Sources
+
+I downloaded two files, linked below, found at the [CDC YRBS website](https://www.cdc.gov/healthyyouth/data/yrbs/data.htm#national). I downloaded the district level Microsoft Access database files because the national files did not have the sitename data we need to determine the location of the survey respondents. Each file contains data going back to the 90s, which means we simply have to select the years we are interested in from each of the high school and middle school databases. 
+
+* [District High School Combined 2021 YRBS Access File](https://www.cdc.gov/healthyyouth/data/yrbs/sadc_2021/SADC_2021_District.zip)
+* [District Middle School Combined 2021 YRBS Access File](https://www.cdc.gov/healthyyouth/data/yrbs/sadc_2021/Middle_School/SADC_MS_2021_District.zip)
+
+Since I'm on Ubuntu (linux), I can't natively open the Access files.  So I converted them to a different database format (sqlite) using the steps detailed in the [Appendix].
+
+It's not necessary that you open the Access files, as I've transformed them into something that's easier to use.  But if you'd like to, either for your own understanding or to validate my work, you should be able to as a Windows user. 
+
+If you have Microsoft 365 through your university, you can install Access.  If not, you likely can get a free trial for a month or so. Your university may also have PCs with Access installed at a library or computer lab. 
+
+## Database Tables
+
+Within databases are things called "tables".  You can think of a table as an excel spreadsheet; a tabular organization of data where each column represents a type of observation (sitename, for example) and each row represents an observation of that data. 
+
+The Access files (which are databases) have two tables: SADCQ and SADCQN.  My current understanding is that the SADCQ contains the raw survey responses, whereas the SADCQN table is a transformation of this data showing frequencies of certain answers.
+
+## Data Formats
+
+There are a few files to reference to understand what the data in a given column means. 
+
+The Data Users Guide is a PDF that explains what question corresponds to each column (eg q23 is "During the past 12 months, have you ever been bullied on school property?"). 
+
+* [District HS Data User's Guide](https://www.cdc.gov/healthyyouth/data/yrbs/pdf/2021/2021-YRBS-SADC-Documentation508.pdf)
+* [District MS Data User's Guide](https://www.cdc.gov/healthyyouth/data/yrbs/pdf/2021/2021-MS-YRBS-SADC-Documentation508.pdf)
+
+The SAS Format Programs and SAS Input Programs contain info about how to understand the data within the databases.  Question 12 is encoded as below:
+
+* " "="Missing"
+* "1"="0 days"
+* "2"="1 day"
+* "3"="2 or 3 days"
+* "4"="4 or 5 days"
+* "5"="6 or more days"
+* other="** Data Error **";
+
+Links: 
+
+* [HS SAS Format Program](https://www.cdc.gov/healthyyouth/data/yrbs/sadc_2021/2021-SADC-SAS-Formats-Program.sas)
+* [HS SAS Input Program](https://www.cdc.gov/healthyyouth/data/yrbs/sadc_2021/2021-SADC-SAS-Input-Program.sas)
+* [MS SAS Format Program](https://www.cdc.gov/healthyyouth/data/yrbs/sadc_2021/2021-SADC-MS-SAS-Formats-Program.sas)
+* [MS SAS Input Program](https://www.cdc.gov/healthyyouth/data/yrbs/sadc_2021/2021-SADC-MS-SAS-Input-Program.sas)
+
+# R Code
+
+```{r}
+
+library(DBI)
+library(RSQLite)
+library(stringr)
+
+```
+
+I'm using three packages here.  The first two are to work with the sqlite databases.  The last one I use to create a state column within the databases. 
+
+## Loading the data from SQLite
+
+```{r}
+
+conn = dbConnect(RSQLite::SQLite(),
+                        dbname = "SADC_2021_HS_District.sqlite")
+
+
+```
+
+With the conn statement above I connect the R session to the sqlite database. This allows me to execute SQL queries within R. When I declare the variable "query" below, I am writing a SQL query where I select only the years we are interested in. 
+
+The dbGetQuery() function takes two arguments, conn, declared above, and the query. The result gets saved in HS_SADCQ (and HS_SADCQN) as a "data.frame" object. Then head() outputs the first 6 rows of the data.frame.  
+
+```{r}
+
+query_SADCQ = "SELECT * FROM SADCQ WHERE year in (2017,2018,2019)"
+query_SADCQN = "SELECT * FROM SADCQN WHERE year in (2017,2018,2019)"
+HS_SADCQ = dbGetQuery(conn, query_SADCQ)
+HS_SADCQN = dbGetQuery(conn, query_SADCQN)
+dbDisconnect(conn)
+head(HS_SADCQ)
+
+```
+
+There are two columns we'll want in the analysis that don't exist in the data set.  For one thing, it will be handy to know which observations are from the high school data set and which are from the middle school data set.  So I create a column called school_type that takes the value "HS" when it's from a high school survey and "MS" when it's from a middle school. 
+
+```{r}
+
+HS_SADCQ$school_type = rep("HS",nrow(HS_SADCQ))
+HS_SADCQN$school_type = rep("HS",nrow(HS_SADCQN))
+
+```
+
+Then I create a column "state" by extracting the state code from the sitename column.  I'm using something called regular expressions here that matches exactly two capital letters ([A-Z]{2}) that directly follow a comma and space ((?<=, )). 
+
+```{r}
+
+HS_SADCQ$state = str_extract(HS_SADCQ$sitename, "(?<=, )[A-Z]{2}")
+HS_SADCQN$state = str_extract(HS_SADCQN$sitename, "(?<=, )[A-Z]{2}")
+
+```
+
+Next we do the same thing but for the middle school data set. 
+
+```{r}
+
+conn = dbConnect(SQLite(),
+                dbname = "SADC_2021_MS_District.sqlite")
+
+
+MS_SADCQ = dbGetQuery(conn, query_SADCQ)
+MS_SADCQN = dbGetQuery(conn, query_SADCQN)
+
+MS_SADCQ$school_type = rep("MS",nrow(MS_SADCQ))
+MS_SADCQN$school_type = rep("MS",nrow(MS_SADCQN))
+MS_SADCQ$state = str_extract(MS_SADCQ$sitename, "(?<=, )[A-Z]{2}")
+MS_SADCQN$state = str_extract(MS_SADCQN$sitename, "(?<=, )[A-Z]{2}")
+
+dbDisconnect(conn)
+```
+
+## Joining high school and middle school
+
+The dim() function tells us the dimensions (rows by columns) of a data.frame object. 
+
+```{r}
+
+dim(HS_SADCQ)
+dim(HS_SADCQN)
+dim(MS_SADCQ)
+dim(MS_SADCQN)
+
+```
+
+As we can see, the MS data sets have fewer columns than the HS data sets. If we're going to join the data sets, either by "stacking" them or (joining)[https://www.w3schools.com/sql/sql_join.asp] them with SQL logic, we need to know which columns from the HS data correspond to the MS data. 
+
+Comparing the Data User's Guides I'm not seeing much overlap between the high school and middle school data sets.  In fact, I'm not seeing any survey questions about guns or weapons within the middle school data user's guide. 
+
+Since I'm not sure yet how and why we would combine the high school and middle school data sets, I'm going to leave them separate for now.  If after the exploratory analysis we find a reason to join them, I will come back and update this document accordingly. 
+
+## Output data
+
+I'm saving the data as both CSV and Rdata files.  Both are widely used formats for storing and loading data in R.  You can use either one to load the data into your R session and follow along with the analyses to come. 
+
+```{r}
+
+write.csv(HS_SADCQ,"HS_SADCQ.csv",row.names = FALSE)
+write.csv(HS_SADCQN,"HS_SADCQN.csv",row.names = FALSE)
+write.csv(MS_SADCQ,"MS_SADCQN.csv",row.names = FALSE)
+write.csv(MS_SADCQN,"MS_SADCQN.csv",row.names = FALSE)
+
+```
+
+```{r}
+
+save(HS_SADCQ, file = "HS_SADCQ.Rdata")
+save(HS_SADCQN, file = "HS_SADCQN.Rdata")
+save(MS_SADCQ, file = "MS_SADCQ.Rdata")
+save(MS_SADCQN, file = "MS_SADCQN.Rdata")
+
+```
+
+# Appendix
+
+## Ubuntu-Converting an MDB database to SQLite
+
+All of the below were entered into a bash terminal. 
+
+If you need to install mdbtools or sqlite
+
+`sudo apt install mdbtools`
+
+`sudo apt install sqlite3`
+
+## High School
+
+Output the schema of the Access database file to a schema.sql file with a sqlite compatible format.
+
+`mdb-schema SADC_2021_District.MDB sqlite > schema.sql`
+
+Similarly, output the data from each table itself to a .sql file.
+
+`mdb-export -I sqlite SADC_2021_District.MDB SADCQN > SADCQN.sql`
+
+`mdb-export -I sqlite SADC_2021_District.MDB SADCQ > SADCQ.sql`
+
+Create the sqlite database. 
+
+`sqlite3 SADC_2021_HS_District.sqlite`
+
+This opens the sqlite interpreter within the terminal which you can exit by typing
+
+`.quit`
+
+Load the data for each table into the newly created sqlite database, starting with the schema.
+
+`cat schema.sql | sqlite3 SADC_2021_HS_District.sqlite`
+
+`cat SADCQN.sql | sqlite3 SADC_2021_HS_District.sqlite`
+
+`cat SADCQ.sql | sqlite3 SADC_2021_HS_District.sqlite`
+
+
+## Middle School
+
+`mdb-schema SADC_MS_2021_District.MDB sqlite > schema.sql`
+
+`mdb-export -I sqlite SADC_MS_2021_District.MDB SADCQN > SADCQN.sql`
+
+`mdb-export -I sqlite SADC_MS_2021_District.MDB SADCQ > SADCQ.sql`
+
+`sqlite3 SADC_2021_MS_District.sqlite`
+
+`.quit`
+
+`cat schema.sql | sqlite3 SADC_2021_MS_District.sqlite`
+
+`cat SADCQN.sql | sqlite3 SADC_2021_MS_District.sqlite`
+
+`cat SADCQ.sql | sqlite3 SADC_2021_MS_District.sqlite`
+

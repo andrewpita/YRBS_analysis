@@ -1,0 +1,179 @@
+---
+title: "YRBS: Trends "
+output:
+    html_document:
+    theme: flatly
+    toc: yes
+    toc_float:
+      collapsed: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+library(dplyr)
+library(ggplot2)
+library(DBI)
+library(RSQLite)
+library(stringr)
+library(survey)
+library(WeMix)
+
+```
+
+# Trends in weapon carry rates 
+
+
+```{r,cache=TRUE}
+
+# Pull all data from 2015 on
+conn = dbConnect(RSQLite::SQLite(),
+                        dbname = "SADC_2021_HS_District.sqlite")
+
+query = "SELECT * FROM SADCQN WHERE year >= 2015"
+HS_SADCQN = dbGetQuery(conn, query)
+dbDisconnect(conn)
+
+HS_SADCQN$state = str_extract(HS_SADCQN$sitename, "(?<=, )[A-Z]{2}")
+
+#select the variables of interest
+HS_SADCQN = HS_SADCQN %>% 
+            select(state,year,PSU,weight,stratum,
+                   sitename,sitecode,age,sex,race4,
+                   qn12,qn13,qn14,qn16,qn19) %>% 
+            filter(state %in% c('CA','FL','PA','TN','TX','IL','IN'))
+            
+
+HS_SADCQN = HS_SADCQN %>% 
+      mutate(state = as.factor(state),
+             year = factor(year,
+                           order = TRUE, 
+                           levels = c("2015","2017","2019",
+                                      "2021")),
+             PSU = as.factor(PSU),
+             weight = as.numeric(weight),
+             stratum = as.factor(stratum),
+             sitename = as.character(sitename),
+             sitecode = as.character(sitecode),
+             age = as.numeric(age),
+             sex = as.factor(sex),
+             race4 = as.factor(race4),
+             qn12 = factor(qn12,levels = c("2","1")),
+             qn13 = factor(qn13,levels = c("2","1")),
+             qn14 = factor(qn14,levels = c("2","1")),
+             qn16 = factor(qn16,levels = c("2","1")),
+             qn19 = factor(qn19,levels = c("2","1")))
+
+yrbsdes = svydesign(id=~PSU, weight=~weight,
+                    strata=~stratum,data=HS_SADCQN, nest=TRUE)
+
+
+results = svyby(~I(qn12 == 1),by = ~year+state,
+                design = yrbsdes, FUN = svyciprop,
+                method = "xlogit",
+                na.rm = TRUE)
+
+results = as.data.frame(results)
+colnames(results) = c("year","state","carried_weapon",'prop_se')
+results = as.data.frame(results)
+results$lb = results$carried_weapon - (2 * results$prop_se)
+results$ub = results$carried_weapon + (2 * results$prop_se)
+
+ggplot(results,aes(x = year,y = carried_weapon,group = 1)) + 
+      geom_line() + 
+      facet_wrap(~state) + 
+      geom_ribbon(aes(ymin=lb, ymax=ub), linetype=2, alpha=0.1) +
+                   labs(x = "Year",y = "Weapon Carry Rate at School") + 
+                   scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+                   facet_wrap(~state,scales = "free")
+      
+
+
+```
+
+```{r,cache=TRUE}
+
+
+HS_SADCQN$post = ifelse(HS_SADCQN$year > 2019,1,0)
+yrbsdes = svydesign(id=~PSU, weight=~weight,
+                    strata=~stratum,data=HS_SADCQN, nest=TRUE)
+model_weapon_carry = svyglm(qn12 ~  post + age + 
+                      sex + race4 + qn14 + qn16 + qn19, 
+                     design = yrbsdes, family = quasibinomial())
+
+summary(model_weapon_carry)
+
+#model_qn14 = svyglm(qn14 ~ post + age + sex + race4,
+#                    design = yrbsdes, family = quasibinomial())
+
+HS_SADCQN$w2 = rep(1,nrow(HS_SADCQN))
+HS_SADCQN$weapon = ifelse(HS_SADCQN$qn12 == 1,1,0)
+re_model_weapon_carry = mix(weapon ~ age + sex + race4 + post + 
+                                qn14 + qn16 + qn19 + (post | state),
+                                data = HS_SADCQN,
+                                weights = c("weight","w2"),
+                               family = binomial(link = "logit"))
+
+
+print(re_model_weapon_carry)
+print(re_model_weapon_carry$ranefMat)
+```
+
+
+```{r}
+
+exp(re_model_weapon_carry$coef)
+exp(re_model_weapon_carry$ranefMat$state)
+
+```
+
+# Trends in gun carry rates 
+
+```{r}
+
+results = svyby(~I(qn13 == 1),by = ~year+state,
+                design = yrbsdes, FUN = svyciprop,
+                method = "xlogit",
+                na.rm = TRUE)
+
+results = as.data.frame(results)
+colnames(results) = c("year","state","carried_gun",'prop_se')
+results = as.data.frame(results)
+results$lb = results$carried_gun - (2 * results$prop_se)
+results$ub = results$carried_gun + (2 * results$prop_se)
+
+ggplot(results,aes(x = year,y = carried_gun,group = 1)) + 
+      geom_line() + 
+      facet_wrap(~state) + 
+      geom_ribbon(aes(ymin=lb, ymax=ub), linetype=2, alpha=0.1) +
+                   labs(x = "Year",y = "Gun Carry Rate") + 
+                   scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+                   facet_wrap(~state,scales = "free")
+
+```
+
+```{r,cache=TRUE}
+
+HS_SADCQN$gun = ifelse(HS_SADCQN$qn13 == 1,1,0)
+re_model_gun_carry = mix(gun ~ age + sex + race4 + post + 
+                                qn14 + qn16 + qn19 + (post | state),
+                                data = HS_SADCQN,
+                                weights = c("weight","w2"),
+                               family = binomial(link = "logit"))
+
+
+print(re_model_gun_carry)
+print(re_model_gun_carry$ranefMat)
+
+
+```
+
+```{r}
+
+exp(re_model_gun_carry$coef)
+exp(re_model_gun_carry$ranefMat$state)
+
+```

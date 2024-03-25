@@ -1,0 +1,638 @@
+---
+title: "Exploratory Analysis and Statistical Analysis Plan"
+output: 
+  html_document:
+    theme: flatly
+    toc: yes
+    toc_float:
+      collapsed: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,message=FALSE,warning=FALSE}
+### Import packages 
+
+library(dplyr)
+library(ggplot2)
+library(DBI)
+library(RSQLite)
+library(stringr)
+library(mice)
+library(tidyr)
+library(survey)
+```
+
+```{r}
+
+######### Use HS_SADCQN_EDA.Rdata and comment out
+######### everything below up to dbDisconnect(conn)
+######## if you want to avoid using sqlite
+
+# Pull all data from 2015 on
+conn = dbConnect(RSQLite::SQLite(),
+                        dbname = "SADC_2021_HS_District.sqlite")
+
+query = "SELECT * FROM SADCQN WHERE year >= 2009"
+HS_SADCQN = dbGetQuery(conn, query)
+dbDisconnect(conn)
+
+#load("HS_SADCQN_EDA.Rdata")
+
+#create a state column
+HS_SADCQN$state = str_extract(HS_SADCQN$sitename, "(?<=, )[A-Z]{2}")
+#select the variables of interest
+HS_SADCQN = HS_SADCQN %>% select(state,year,PSU,weight,stratum,
+                               sitename,sitecode,
+                     age,sex,race4,qn12,qn13,qn14,qn15,qn16,
+                     qn17,qn18,qn19,qn23)
+
+```
+
+# Exploratory Data Analysis
+
+As a first step to exploring the data, we need to look through the documentation and see what data is included. In the  [Data User's Guide](https://www.cdc.gov/healthyyouth/data/yrbs/pdf/2021/2021-YRBS-SADC-Documentation508.pdf) one can find a description for every variable included in the database. 
+
+## Available data
+
+### Data needed for analysis of survey data
+
+The following variables are related to the design of the survey. It is necessary to account for the sample design during the analysis, so we want to make sure we pull and use this data. 
+
+* PSU - Primary Sampling Unit (PSU)
+* Weight - Analytical weight.  Used to weight the data when constructing statistics (like the  sample mean) so that sub-populations are properly represented. 
+* Stratum 
+* Year - Survey year
+
+I'm not certain at the moment if we will need the following variables, but I'm going to include them for now. 
+
+* sitecode
+* sitename 
+
+### Demographic data
+
+We'll want to include demographic data in the analysis for a couple reasons.  For one, it's useful and interesting to stratify by these groups during the exploratory analysis. These are also likely variables we will want to adjust for in any linear models we use. 
+
+* Age
+* Sex
+* Grade
+* race4
+
+### Variables of interest
+
+While going through the data user's guide, I recorded any survey question that I felt might have some relevance to the question at hand. Questions 12 and 13 are the outcome variables we're interested in.  The rest of the questions might help explain the patterns we observe in questions 12 and 13.  It would be a good idea for you to  take a look at the guide and see if there's anything I missed here. 
+
+
+* qn12 - During the past 30 days, on how many days did you carry a weapon such as a gun, knife, or club on school
+property?
+
+* qn13 - During the past 12 months, on how many days did you carry a gun? (Do not count the days when you carried a
+gun only for hunting or for a sport, such as target shooting.)
+
+* qn14 - During the past 30 days, on how many days did you not go to school because you felt you would be unsafe at
+school or on your way to or from school?
+
+* qn15 - During the past 12 months, how many times has someone threatened or injured you with a weapon such as a
+gun, knife, or club on school property?
+
+* qn16 During the past 12 months, how many times were you in a physical fight?
+
+* qn17 - During the past 12 months, how many times were you in a physical fight on school property?
+
+* qn18 - Have you ever seen someone get physically attacked, beaten, stabbed, or shot in your neighborhood?
+
+* qn19 - Have you ever been physically forced to have sexual intercourse when you did not want to?
+
+* qn23 - During the past 12 months, have you ever been bullied on school property?
+
+
+#### Geographical variables related to outcome/treatment
+
+The sitename variable contains the county name in which the survey was conducted.  Parkland, Florida is located in Broward County, which is contained in the data. Looking at google maps, Parkland is right next to Palm Beach county, which is something to consider. 
+
+Santa Fe, Texas is located in Galveston County, which is not explicitly contained in the data.  However, Santa Fe is about a 45 minute drive from Houston, which is contained in the data. 
+
+```{r}
+# Florida locations
+HS_SADCQN %>% filter(state == "FL") %>% select(sitename,sitecode) %>% unique()
+
+# Texas locations 
+ HS_SADCQN %>% filter(state == "TX") %>% select(sitename,sitecode) %>% unique()
+
+```
+
+
+## Missingness
+
+So now that we have a subset of data that will be relevant for the analysis, it's time to start exploring it. 
+To start, we should examine the patterns of missingness, as this might further shrink the data of interest. 
+
+Since questions 12 and 13 are really crucial, let's take a look at just those variables. 
+
+### Outcome variables - Question 12 and 13
+
+```{r,fig.width=12, fig.height=8}
+
+# calculate the missing values for q12 and q13 
+# grouped by state and year
+df = HS_SADCQN %>% select(state,year,qn12,qn13) %>%
+     filter(year >= 2015) %>% 
+     group_by(state, year) %>%
+     summarise_all(~mean(is.na(.))) 
+
+# move the data from wide format to long, as this makes it easier to plot
+df = df %>% pivot_longer(
+    cols = -c(state, year), # Selecting all columns except state and year
+    names_to = "question",   # This will be the new column for variable names
+    values_to = "missing"  # This will be the new column for number of missing values
+  )
+
+#create the plot below
+ggplot(df, aes(x = state,y = missing,fill = question)) + 
+  geom_bar(stat = "identity",position = "dodge") + 
+  facet_wrap(~year,scales='free') + 
+  labs(x = "State", y = "Percent Missing",fill = "Question") +
+  theme(strip.text.x = element_text(size = 14),
+        axis.title =  element_text(size = 15),
+        axis.text = element_text(size = 11)) + 
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1))
+
+
+
+
+```
+
+On the graph above we have 4 plots, 1 for each year.  As you can see by looking at the successive x-axes, there were fewer states in the data set in 2015 and 2017. There was no state that included question 13 in their survey in 2015. After that, we have some states that look promising. 
+
+There are 4 states with populated qn12 data for all years:
+
+* CA
+* FL
+* PA
+* TX
+
+and two more states with qn12 data from 2017 on. 
+
+* IL
+* TN 
+
+There are 5 states with qn13 data from 2017 on:
+
+* CA
+* FL
+* PA
+* TN
+* TX
+
+CA and FL have a fair amount of missing data for qn12 and qn13, but I think it's at a level that we can impute those missing values. 
+
+Let's grab only these states from the database and then examine the other variables of interest. 
+
+```{r}
+
+df = HS_SADCQN %>% select(-c(qn12,qn13)) %>%
+     filter(year >= 2015,
+            state %in% c('CA','FL','PA','TN','TX','IL','IN')) %>%
+     group_by(state, year) %>%
+     summarise_all(~mean(is.na(.))) 
+     
+df = df %>% pivot_longer(
+    cols = -c(state, year), # Selecting all columns except state and year
+    names_to = "question",   # This will be the new column for variable names
+    values_to = "missing"  # This will be the new column for number of missing values
+  )
+
+ggplot(df, aes(x = question, y = factor(state), fill = missing)) +
+    geom_tile() +
+    geom_text(aes(label = sprintf("%.2f%%", round(missing*100))), size = 2, vjust = -0.3) + # Smaller text with percentage format
+    facet_grid(year ~ .) +
+    scale_fill_gradient(low = "white", high = "red", 
+                        labels =scales::percent_format()) + # Legend as percentages
+    theme_minimal() +
+    labs(x = "Question", y = "State", fill = "Percent Missing Values") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+
+```
+
+Thankfully, the demographic data and survey design data are well populated. Question 18 has a lot of missing data, so it's probably best to throw that variable out. Questions 15, 17, and 23 are missing in PA for 2021, but everything else looks either well populated or within imputable ranges. 
+
+The questions mentioned above are all related to fights, threats, or bullying. We'll have to use question 16 in their stead. 
+
+### Trend analysis
+
+There is documentation explaining how to use R to analyze the YRBS data accounting for the survey design [here](https://www.cdc.gov/healthyyouth/data/yrbs/pdf/2019/2019_YRBS_analysis_software.pdf) and [here](https://www.cdc.gov/healthyyouth/data/yrbs/pdf/2021/2021_YRBS_combining_data_508.pdf). 
+
+Essentially, the survey package allows you to specify the survey design, and then there are functions that that make various calculations based on this design.  Below I use the `svyciprop` and  `svyby` functions to calculate the proportion of students who carried a weapon in school and the proportion of students who carried a gun (both in the past 30 days).
+
+```{r}
+df_qn12 = HS_SADCQN %>% select(-c(qn13,qn15,qn17,qn18,qn23)) %>%
+     filter(state %in% c('CA','FL','PA','TN','TX','IL','IN'))
+
+df_qn12 <- df_qn12 %>% 
+      mutate(state = as.factor(state),
+             year = factor(year,
+                           order = TRUE, 
+                           levels = c("2009","2011","2013",
+                                      "2015","2017","2019",
+                                      "2021")),
+             PSU = as.factor(PSU),
+             weight = as.numeric(weight),
+             stratum = as.factor(stratum),
+             sitename = as.character(sitename),
+             sitecode = as.character(sitecode),
+             age = as.numeric(age),
+             sex = as.factor(sex),
+             race4 = as.factor(race4),
+             qn12 = factor(qn12,levels = c("2","1")),
+             qn14 = factor(qn14,levels = c("2","1")),
+             qn16 = factor(qn16,levels = c("2","1")),
+             qn19 = factor(qn19,levels = c("2","1")))
+
+yrbsdes = svydesign(id=~PSU, weight=~weight,
+                    strata=~stratum,data=df_qn12, nest=TRUE)
+
+
+results = svyby(~I(qn12==1),by = ~year+state,
+                design = yrbsdes, FUN = svyciprop,
+                na.rm = TRUE)
+
+colnames(results) = c("year","state","carried_weapon",'prop_se')
+ggplot(results,aes(x = year,y = carried_weapon,
+                   group = state,color = state)) + 
+                   geom_text(data = results,
+                             aes(label = state), 
+                             check_overlap = TRUE, vjust = "top") +
+                   geom_line() + 
+                   labs(x = "Year",y = "Weapon Carry Rate at School") + 
+                   scale_y_continuous(labels = scales::percent_format(accuracy = 1))
+```
+
+I wanted to go back quite a bit so that we can really see the trend. Aside from CA and IL, there's a noticeable jump from 2019 to 2021.  
+
+```{r}
+
+df_qn13 = HS_SADCQN %>% select(-c(qn12,qn15,qn17,qn18,qn23)) %>%
+     filter(year > 2015,
+            state %in% c('CA','FL','PA','TN','TX'))
+
+df_qn13 <- df_qn13 %>% 
+      mutate(state = as.factor(state),
+             year = factor(year,
+                           order = TRUE, 
+                           levels = c("2009","2011","2013",
+                                      "2015","2017","2019",
+                                      "2021")),
+             PSU = as.factor(PSU),
+             weight = as.numeric(weight),
+             stratum = as.factor(stratum),
+             sitename = as.character(sitename),
+             sitecode = as.character(sitecode),
+             age = as.numeric(age),
+             sex = as.factor(sex),
+             race4 = as.factor(race4),
+             qn13 = factor(qn13,levels = c("2","1")),
+             qn14 = factor(qn14,levels = c("2","1")),
+             qn16 = factor(qn16,levels = c("2","1")),
+             qn19 = factor(qn19,levels = c("2","1")))
+
+yrbsdes = svydesign(id=~PSU, weight=~weight,
+                    strata=~stratum,data=df_qn13, nest=TRUE)
+
+results = svyby(~I(qn13==1),by = ~year+state,
+                design = yrbsdes, FUN = svyciprop,
+                na.rm = TRUE)
+
+colnames(results) = c("year","state","carried_gun",'prop_se')
+ggplot(results,aes(x = year,y = carried_gun,
+                   group = state,color = state)) + 
+                   geom_text(data = results,
+                             aes(label = state), 
+                             check_overlap = TRUE, vjust = "top") +
+                   geom_line() + 
+                   labs(x = "Year",y = "Gun Carry Rate") + 
+                   scale_y_continuous(labels = scales::percent_format(accuracy = 1))
+
+
+```
+
+The gun carry rate does not appear to have this jump from 2019 to 2021. 
+
+Really quickly, let's do a DID analysis on this raw data (without imputating missing values).  There were shootings in both Florida and Texas in 2018, so we will label those states as the treatment group.  Any observation after 2017 is labeled as post treatment. 
+
+```{r}
+df_qn12 = df_qn12 %>% filter(as.numeric(as.character(year)) > 2014)
+df_qn12$treatment = ifelse(df_qn12$state %in% c("FL","TX"),1,0)
+df_qn12$post_treatment = ifelse(df_qn12$year > 2017,1,0)
+
+df_qn13$treatment = ifelse(df_qn13$state %in% c("FL","TX"),1,0)
+df_qn13$post_treatment = ifelse(df_qn13$year > 2017,1,0)
+
+yrbsdes = svydesign(id=~PSU, weight=~weight,
+                    strata=~stratum,data=df_qn12, nest=TRUE)
+
+model_weapon_carry = svyglm(qn12 ~ treatment * post_treatment + age + 
+                      sex + race4 + qn14 + qn16 + qn19, 
+                     design = yrbsdes, family = quasibinomial())
+
+yrbsdes = svydesign(id=~PSU, weight=~weight,
+                    strata=~stratum,data=df_qn13, nest=TRUE)
+
+model_gun_carry = svyglm(qn13 ~ treatment * post_treatment + age + 
+                      sex + race4 + qn14 + qn16 + qn19, 
+                     design = yrbsdes, family = quasibinomial())
+
+
+summary(model_weapon_carry)
+```
+
+For question 12 (carrying a weapon at school in the last 30 days), there is no evidence of treatment effect.  You want to look at the coefficient and p value for treatment:post_treatment interaction.  Unsurprisingly, sex and the other questions about violence are significantly associated with carrying weapons at school. 
+
+```{r}
+
+summary(model_gun_carry)
+
+```
+
+Again, we see no evidence that there was a treatment effect on the rate of carrying guns (not limited to at school, and not related to shooting sports like hunting). Sex, race, and community violence were all significantly associated with carrying guns. 
+
+
+#### Within state exploration
+
+Let's see if within Florida and Texas if there are any differences between the locations in terms of carry rates. 
+
+I limit this exploration to only those counties that have data for every year, which should definitely be noted as a limitation compared to the state level analysis. 
+
+```{r}
+
+FL_qn12 = df_qn12 %>% filter(state == "FL")
+sitecodes = FL_qn12 %>% group_by(sitecode) %>% summarise(years = n_distinct(year))
+sitecodes = sitecodes %>% filter(years == 4) %>% select(sitecode) %>% pull()
+FL_qn12 = FL_qn12 %>% filter(sitecode %in% sitecodes)
+FL_qn12$treatment = ifelse(FL_qn12$sitecode == "FT",1,0)
+FL_qn12$post_treatment = ifelse(FL_qn12$year > 2017,1,0)
+
+TX_qn12 = df_qn12 %>% filter(state == "TX")
+sitecodes = TX_qn12 %>% group_by(sitecode) %>% summarise(years = n_distinct(year))
+sitecodes = sitecodes %>% filter(years == 4) %>% select(sitecode) %>% pull()
+TX_qn12 = TX_qn12 %>% filter(sitecode %in% sitecodes)
+TX_qn12$treatment = ifelse(TX_qn12$sitecode == "HO",1,0)
+TX_qn12$post_treatment = ifelse(TX_qn12$year > 2017,1,0)
+
+yrbsdes = svydesign(id=~PSU, weight=~weight,
+                    strata=~stratum,data=FL_qn12, nest=TRUE)
+
+
+results = svyby(~I(qn12==1),by = ~year+sitename,
+                design = yrbsdes, FUN = svyciprop,
+                na.rm = TRUE)
+
+colnames(results) = c("year","site","carried_weapon",'prop_se')
+ggplot(results,aes(x = year,y = carried_weapon,
+                   group = site,color = site)) + 
+                   geom_text(data = results,
+                             aes(label = substring(site,nchar(site)-2,nchar(site)-1)),
+                             check_overlap = TRUE, vjust = "top") +
+                   geom_line() + 
+                   labs(x = "Year",y = "Weapon Carry Rate at School") + 
+                   scale_y_continuous(labels = scales::percent_format(accuracy = 1))
+
+```
+
+Palm Beach County looks to be the exception here, in that it's the only county that doesn't have a low, or near low, in 2019 followed by a jump in 2021. 
+
+
+```{r}
+
+yrbsdes = svydesign(id=~PSU, weight=~weight,
+                    strata=~stratum,data=TX_qn12, nest=TRUE)
+
+
+results = svyby(~I(qn12==1),by = ~year+sitename,
+                design = yrbsdes, FUN = svyciprop,
+                na.rm = TRUE)
+
+colnames(results) = c("year","site","carried_weapon",'prop_se')
+ggplot(results,aes(x = year,y = carried_weapon,
+                   group = site,color = site)) + 
+                   geom_line() + 
+                   geom_text(data = results,
+                             aes(label = substring(site,nchar(site)-2,nchar(site)-1)),
+                             check_overlap = TRUE, vjust = "top") +
+                   labs(x = "Year",y = "Weapon Carry Rate at School") + 
+                   scale_y_continuous(labels = scales::percent_format(accuracy = 1))
+
+```
+
+Once again we see this pattern where there is a jump in the rate in 2021.  This is especially pronounced in Houston.  
+
+```{r}
+
+FL_qn13 = df_qn13 %>% filter(state == "FL")
+sitecodes = FL_qn13 %>% group_by(sitecode) %>% summarise(years = n_distinct(year))
+sitecodes = sitecodes %>% filter(years == 3) %>% select(sitecode) %>% pull()
+FL_qn13 = FL_qn13 %>% filter(sitecode %in% sitecodes)
+FL_qn13 = FL_qn13 %>% filter(sitecode != "DU")
+FL_qn13$treatment = ifelse(FL_qn13$sitecode == "FT",1,0)
+FL_qn13$post_treatment = ifelse(FL_qn13$year > 2017,1,0)
+
+FL_qn13_missing = FL_qn13 %>% 
+                  group_by(sitecode,year) %>%
+                  summarise_all(~mean(is.na(.)))
+
+yrbsdes = svydesign(id=~PSU, weight=~weight,
+                    strata=~stratum,data=FL_qn13, nest=TRUE)
+
+
+results = svyby(~I(qn13==1),by = ~year+sitename,
+                design = yrbsdes, FUN = svyciprop,
+                na.rm = TRUE)
+
+colnames(results) = c("year","site","carried_gun",'prop_se')
+ggplot(results,aes(x = year,y = carried_gun,
+                   group = site,color = site)) + 
+                   geom_line() + 
+                   geom_text(data = results,
+                             aes(label = substring(site,nchar(site)-2,nchar(site)-1)),
+                             check_overlap = TRUE, vjust = "top") +
+                   labs(x = "Year",y = "Gun Carry Rate") + 
+                   scale_y_continuous(labels = scales::percent_format(accuracy = 1))
+
+```
+
+```{r}
+
+TX_qn13 = df_qn13 %>% filter(state == "TX")
+sitecodes = TX_qn13 %>% group_by(sitecode) %>% summarise(years = n_distinct(year))
+sitecodes = sitecodes %>% filter(years == 3) %>% select(sitecode) %>% pull()
+TX_qn13 = TX_qn13 %>% filter(sitecode %in% sitecodes)
+TX_qn13$treatment = ifelse(TX_qn13$sitecode == "HO",1,0)
+TX_qn13$post_treatment = ifelse(TX_qn13$year > 2017,1,0)
+
+FL_qn13_missing = FL_qn13 %>% 
+                  group_by(sitecode,year) %>%
+                  summarise_all(~mean(is.na(.)))
+
+yrbsdes = svydesign(id=~PSU, weight=~weight,
+                    strata=~stratum,data=TX_qn13, nest=TRUE)
+
+
+results = svyby(~I(qn13==1),by = ~year+sitename,
+                design = yrbsdes, FUN = svyciprop,
+                na.rm = TRUE)
+
+colnames(results) = c("year","site","carried_gun",'prop_se')
+ggplot(results,aes(x = year,y = carried_gun,
+                   group = site,color = site)) + 
+                   geom_line() + 
+                   geom_text(data = results,
+                             aes(label = substring(site,nchar(site)-2,nchar(site)-1)),
+                             check_overlap = TRUE, vjust = "top") +
+                   labs(x = "Year",y = "Gun Carry Rate") + 
+                   scale_y_continuous(labels = scales::percent_format(accuracy = 1))
+
+
+```
+
+#### Demographic breakdown of rates
+
+```{r}
+
+
+
+yrbsdes = svydesign(id=~PSU, weight=~weight,
+                    strata=~stratum,data=df_qn12, nest=TRUE)
+
+
+results = svyby(~I(qn12==1),by = ~year+race4,
+                design = yrbsdes, FUN = svyciprop,
+                na.rm = TRUE)
+
+colnames(results) = c("year","race4","carried_weapon",'prop_se')
+
+results$race4 = case_when(
+            results$race4 == 1 ~ "White",
+            results$race4 == 2 ~ "Black or African American",
+            results$race4 == 3 ~ "Hispanic/Latino",
+            results$race4 == 4 ~ "All other races",
+            TRUE ~ NA_character_ # This line handles any unexpected values
+)
+
+ggplot(results,aes(x = year,y = carried_weapon,
+                   group = race4,color = race4)) + 
+                   geom_line() + 
+                   labs(x = "Year",y = "Weapon Carry Rate at School") + 
+                   scale_y_continuous(labels = scales::percent_format(accuracy = 1))
+
+
+
+```
+
+```{r}
+
+
+
+yrbsdes = svydesign(id=~PSU, weight=~weight,
+                    strata=~stratum,data=df_qn13, nest=TRUE)
+
+
+results = svyby(~I(qn13==1),by = ~year+race4,
+                design = yrbsdes, FUN = svyciprop,
+                na.rm = TRUE)
+
+colnames(results) = c("year","race4","carried_gun",'prop_se')
+
+results$race4 = case_when(
+            results$race4 == 1 ~ "White",
+            results$race4 == 2 ~ "Black or African American",
+            results$race4 == 3 ~ "Hispanic/Latino",
+            results$race4 == 4 ~ "All other races",
+            TRUE ~ NA_character_ # This line handles any unexpected values
+)
+
+ggplot(results,aes(x = year,y = carried_gun,
+                   group = race4,color = race4)) + 
+                   geom_line() + 
+                   labs(x = "Year",y = "Gun Carry Rate") + 
+                   scale_y_continuous(labels = scales::percent_format(accuracy = 1))
+
+
+```
+
+
+
+## DID Assumptions
+
+Let's go through the processs of examining the 
+https://www.publichealth.columbia.edu/research/population-health-methods/difference-difference-estimation
+
+https://www.sciencedirect.com/topics/economics-econometrics-and-finance/difference-in-differences
+
+In order to estimate any causal effect, three assumptions must hold: exchangeability, positivity, and Stable Unit Treatment Value Assumption (SUTVA)1
+. DID estimation also requires that:
+
+* Intervention unrelated to outcome at baseline (allocation of intervention was not determined by outcome)
+in the absence of treatment, the difference between the ‘treatment’ and ‘control’ group is constant over time.         * Although there is no statistical test for this assumption, visual inspection is useful when you have observations over many time points. It has also been proposed that the smaller the time period tested, the more likely the assumption is to hold. Violation of parallel trend assumption will lead to biased estimation of the causal effect.
+* Treatment/intervention and control groups have Parallel Trends in outcome (see below for details)
+* Composition of intervention and comparison groups is stable for repeated cross-sectional design (part of SUTVA)
+* No spillover effects (part of SUTVA)
+
+# Statistical Analysis Plan
+
+
+## Regression Model
+
+$Y= \beta_0 + \beta_1(\text{Time}) + \beta_2(\text{Intervention}) + \beta_3(\text{Time} \times \text{Intervention}) + \beta_4(\text{Covariates})+ \epsilon$
+
+### Multiple Imputation
+
+Let's impute the missing data, so that we can begin exploring the patterns in the data. 
+
+Because we have slightly different combinations of states for questions qn12 and qn13, we'll have to impute these separately.
+
+```{r}
+
+# df_qn12 = HS_SADCQN %>% select(-c(qn13,qn15,qn17,qn18,qn23)) %>%
+#      filter(state %in% c('CA','FL','PA','TN','TX','IL','IN'),
+#             year > 2015)
+# 
+# df_qn12 <- df_qn12 %>% 
+#       mutate(state = as.factor(state),
+#              year = factor(year,
+#                            order = TRUE, 
+#                            levels = c("2017", "2019","2021")),
+#              PSU = as.factor(PSU),
+#              weight = as.numeric(weight),
+#              stratum = as.factor(stratum),
+#              age = as.numeric(age),
+#              sex = as.factor(sex),
+#              race4 = as.factor(race4),
+#              qn12 = as.factor(qn12),
+#              qn14 = as.factor(qn14),
+#              qn16 = as.factor(qn16),
+#              qn19 = as.factor(qn19))
+# 
+# imputation_methods_qn12 <- list(
+#   state = NULL,    
+#   year = NULL, 
+#   PSU = NULL,
+#   weight = NULL,
+#   stratum = NULL,
+#   age = "pmm",
+#   sex = "logreg",
+#   race4 = "rf",
+#   qn12 = "logreg",
+#   qn14 = "logreg",
+#   qn16 = "logreg",
+#   qn19 = "logreg"
+# )
+# 
+# imp_df_qn12 <- mice(df_qn12, m=5, method=imputation_methods_qn12, seed=500)
+# plot(imp_df_qn12)
+
+```
+
